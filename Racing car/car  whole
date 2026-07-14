@@ -1,29 +1,22 @@
+#define REMOTEXY_MODE__ESP32_WIFI
+
 #include <WiFi.h>
-#include "esp_wifi.h"
-#include <WiFiUdp.h>
 #include <EEPROM.h>
 
-// ============== Motor PIN Settings ==============
+#define REMOTEXY_WIFI_SSID "Big wee wee"      
+#define REMOTEXY_WIFI_PASSWORD "12061206"     
+#define REMOTEXY_SERVER_PORT 6377
+#define REMOTEXY_ACCESS_PASSWORD "0000"
+
+#include <RemoteXY.h>
+
 const int back_motor_pwm = 25;
 const int direction_motor_pwm = 26;
 const int back_motor_dir = 32;      // 後馬達方向腳
 const int direction_motor_dir = 33;  // 轉向馬達方向腳
 
-// ============== WiFi Settings ==============
-const char* ssid = "ESP32_RC_CAR";
-const char* password = "12345678";
-
-WiFiUDP udp;
-const int udpPort = 8888;
-char incomingPacket[255];
-
-// ============== RemoteXY Configuration ==============
-#define REMOTEXY_MODE__HARDSERIAL
-#define REMOTEXY_SERIAL Serial
-#define REMOTEXY_SERIAL_SPEED 115200
-#define REMOTEXY_ACCESS_PASSWORD "0000"
-
-#include <RemoteXY.h>
+const int MAX_MOTOR_SPEED = 255;    // 最大馬達速度
+const int MIN_MOTOR_SPEED = 0;      // 最小馬達速度
 
 // RemoteXY GUI configuration  
 #pragma pack(push, 1)  
@@ -40,40 +33,63 @@ uint8_t const PROGMEM RemoteXY_CONF_PROGMEM[] =   // 202 bytes V21
   32,10,131,15,23,4,64,65,115,105,103,110,97,108,32,115,116,97,116,117,
   115,0 };
   
-// this structure defines all the variables and events of your control interface 
 struct {
 
-    // input variables
   int8_t joy1_x; // from -100 to 100
   int8_t joy2_y; // from -100 to 100
   int8_t joy2_x; // from -100 to 100
   int8_t joystick_01_y; // from -100 to 100
   uint8_t Mode; // from 0 to 2
 
-    // output variables
   float speed; // from 0 to 50
   float Battery;
   int16_t connect; // -32768 .. +32767
 
 } RemoteXY;   
 #pragma pack(pop)
-
-// ============== Variables ==============
-int current_speed = 0;      // 當前速度
-int current_direction = 0;  // 當前方向
+ 
+int current_speed = 0;           // 當前速度
+int current_direction = 0;       // 當前方向
 unsigned long lastSerialTime = 0;
 const unsigned long SERIAL_INTERVAL = 500; // 每500ms打印一次
-int wifi_stations = 0;      // 連接的客戶端數量
+
+// ============== Mode Variables ==============
+// Mode 0: 普通模式
+// Mode 1: 衝刺模式 (馬達速度加倍)
+// Mode 2: 緩速模式 (馬達速度減半)
+float speed_multiplier = 1.0;
 
 void RemoteXY_Mode_event() {
   Serial.print("Mode changed to: ");
   Serial.println(RemoteXY.Mode);
+  
+  // 根據模式調整速度倍數
+  switch(RemoteXY.Mode) {
+    case 0:
+      speed_multiplier = 1.0;
+      Serial.println("Normal Mode");
+      break;
+    case 1:
+      speed_multiplier = 1.5;  // 衝刺模式
+      Serial.println("Sprint Mode (1.5x Speed)");
+      break;
+    case 2:
+      speed_multiplier = 0.5;  // 緩速模式
+      Serial.println("Slow Mode (0.5x Speed)");
+      break;
+    default:
+      speed_multiplier = 1.0;
+      break;
+  }
 }
 
 void setup() 
 {
   Serial.begin(115200);
   delay(1000);
+  
+  Serial.println("\n\n========== Racing Car System ==========");
+  Serial.println("Version: STA Mode with RemoteXY");
   
   // ============== GPIO Setup ==============
   pinMode(back_motor_pwm, OUTPUT);
@@ -87,49 +103,51 @@ void setup()
   digitalWrite(back_motor_dir, LOW);
   digitalWrite(direction_motor_dir, LOW);
 
-  // ============== WiFi Setup ==============
-  WiFi.softAP(ssid, password);
-  Serial.println("\n\nWiFi AP Started!");
+  Serial.println("\nConnecting to WiFi Hotspot...");
   Serial.print("SSID: ");
-  Serial.println(ssid);
-  Serial.print("IP Address: ");
-  Serial.println(WiFi.softAPIP());
-  Serial.println("AP OK - Waiting for RemoteXY connection...");
-
-  // ============== UDP Setup ==============
-  udp.begin(udpPort);
-  Serial.println("UDP Ready");
-
-  // ============== RemoteXY Setup ==============
-  RemoteXY_Init();
+  Serial.println(REMOTEXY_WIFI_SSID);
+  
+  RemoteXY_Init();  // 啟動並開始連線手機熱點
+  
   RemoteXYEngine.addVariableEvent(RemoteXY.Mode, RemoteXY_Mode_event);
+
+  EEPROM.begin(RemoteXYEngine.getEepromSize()); // init EEPROM
   
   Serial.println("RemoteXY Initialized!");
+  
+  // 等待連接
+  int timeout = 20;
+  while(WiFi.status() != WL_CONNECTED && timeout > 0) {
+    delay(500);
+    timeout--;
+  }
+  
+  if(WiFi.status() == WL_CONNECTED) {
+    Serial.print("WiFi Connected!");
+    Serial.print(" | ESP32 IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("WiFi Connection Failed!");
+  }
+  
+  Serial.println("=========================================");
   Serial.println("System Ready!\n");
 }
 
 int wifi_link() { 
   // 確認wifi連接狀態，回傳訊號強度: dB值
-  wifi_stations = WiFi.softAPgetStationNum();
-  
-  if(wifi_stations == 0) {
-    return 0;
+  if (WiFi.status() != WL_CONNECTED) {
+    return 0; // 若沒連上手機，回傳 0
   }
-
-  wifi_sta_list_t stationList;
-  esp_wifi_ap_get_sta_list(&stationList);
-
-  if(stationList.num > 0) {
-    return stationList.sta[0].rssi;
-  }
-
-  return 0;
+  return WiFi.RSSI(); // 直接回傳與手機熱點連接的訊號強度 (例如 -50 dBm)
 }
 
 void speed(int speedValue) {
   // speedValue: -255 ~ 255
   // 負值 = 後退，正值 = 前進
   
+  // 套用速度倍數
+  speedValue = constrain((int)(speedValue * speed_multiplier), -255, 255);
   current_speed = speedValue;
   
   if(speedValue > 0) {
@@ -171,12 +189,13 @@ void turn(int directionValue) {
 }
 
 float readBatteryVoltage() {
-  // 讀取電池電壓 (如果有使用ADC)
-  // 這是示例代碼，需要根據實際硬體調整
-  // int rawValue = analogRead(34);
+  // 讀取電池電壓
+  // 方法: int rawValue = analogRead(34);
   // float voltage = (rawValue / 4095.0) * 3.3 * 3;  // 假設分壓器比例為1:3
   // return voltage;
-  return 12.0; // 目前使用固定值
+  
+  // 目前使用固定值
+  return 12.0;
 }
 
 void handleRemoteControl() {
@@ -200,9 +219,32 @@ void handleRemoteControl() {
   RemoteXY.connect = wifi_link();
 }
 
+void printSystemStatus() {
+  // 打印系統狀態
+  Serial.print("WiFi: ");
+  if(WiFi.status() == WL_CONNECTED) {
+    Serial.print("Connected | Signal: ");
+    Serial.print(wifi_link());
+    Serial.print(" dBm");
+  } else {
+    Serial.print("Disconnected");
+  }
+  
+  Serial.print(" | Speed: ");
+  Serial.print(current_speed);
+  Serial.print(" | Direction: ");
+  Serial.print(current_direction);
+  Serial.print(" | Mode: ");
+  Serial.print(RemoteXY.Mode);
+  Serial.print(" (x");
+  Serial.print(speed_multiplier);
+  Serial.print(") | Battery: ");
+  Serial.print(RemoteXY.Battery);
+  Serial.println(" V");
+}
+
 void loop() 
 { 
-  // RemoteXY 事件處理
   RemoteXYEngine.handler();
   
   // 處理遙控輸入
@@ -212,19 +254,6 @@ void loop()
   unsigned long currentTime = millis();
   if(currentTime - lastSerialTime >= SERIAL_INTERVAL) {
     lastSerialTime = currentTime;
-    
-    Serial.print("Connected Clients: ");
-    Serial.print(wifi_stations);
-    Serial.print(" | WiFi Signal: ");
-    Serial.print(wifi_link());
-    Serial.print(" dB | Speed: ");
-    Serial.print(current_speed);
-    Serial.print(" | Direction: ");
-    Serial.print(current_direction);
-    Serial.print(" | Mode: ");
-    Serial.print(RemoteXY.Mode);
-    Serial.print(" | Battery: ");
-    Serial.print(RemoteXY.Battery);
-    Serial.println(" V");
+    printSystemStatus();
   }
 }
