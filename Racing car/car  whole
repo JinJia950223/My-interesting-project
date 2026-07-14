@@ -1,0 +1,230 @@
+#include <WiFi.h>
+#include "esp_wifi.h"
+#include <WiFiUdp.h>
+#include <EEPROM.h>
+
+// ============== Motor PIN Settings ==============
+const int back_motor_pwm = 25;
+const int direction_motor_pwm = 26;
+const int back_motor_dir = 32;      // 後馬達方向腳
+const int direction_motor_dir = 33;  // 轉向馬達方向腳
+
+// ============== WiFi Settings ==============
+const char* ssid = "ESP32_RC_CAR";
+const char* password = "12345678";
+
+WiFiUDP udp;
+const int udpPort = 8888;
+char incomingPacket[255];
+
+// ============== RemoteXY Configuration ==============
+#define REMOTEXY_MODE__HARDSERIAL
+#define REMOTEXY_SERIAL Serial
+#define REMOTEXY_SERIAL_SPEED 115200
+#define REMOTEXY_ACCESS_PASSWORD "0000"
+
+#include <RemoteXY.h>
+
+// RemoteXY GUI configuration  
+#pragma pack(push, 1)  
+uint8_t const PROGMEM RemoteXY_CONF_PROGMEM[] =   // 202 bytes V21 
+  { 254,5,0,10,0,0,0,1,0,4,1,0,188,0,21,0,0,0,114,97,
+  99,105,110,103,32,99,97,114,0,178,2,106,200,200,84,1,1,9,0,5,
+  30,18,43,43,23,34,33,33,32,204,16,31,5,238,59,79,79,143,32,33,
+  33,32,204,16,31,71,13,26,71,71,75,28,50,50,56,0,2,24,75,0,
+  0,0,0,0,0,72,66,0,0,32,65,0,0,32,65,0,0,0,64,24,
+  107,109,47,104,0,67,77,5,21,24,163,8,21,6,109,2,178,2,3,253,
+  234,39,105,21,4,24,13,130,2,26,129,12,14,71,29,28,18,11,4,64,
+  17,77,111,100,101,0,129,6,47,26,10,167,15,13,4,64,65,66,97,116,
+  116,101,114,121,0,67,88,24,11,14,132,8,21,6,117,2,178,129,77,40,
+  32,10,131,15,23,4,64,65,115,105,103,110,97,108,32,115,116,97,116,117,
+  115,0 };
+  
+// this structure defines all the variables and events of your control interface 
+struct {
+
+    // input variables
+  int8_t joy1_x; // from -100 to 100
+  int8_t joy2_y; // from -100 to 100
+  int8_t joy2_x; // from -100 to 100
+  int8_t joystick_01_y; // from -100 to 100
+  uint8_t Mode; // from 0 to 2
+
+    // output variables
+  float speed; // from 0 to 50
+  float Battery;
+  int16_t connect; // -32768 .. +32767
+
+} RemoteXY;   
+#pragma pack(pop)
+
+// ============== Variables ==============
+int current_speed = 0;      // 當前速度
+int current_direction = 0;  // 當前方向
+unsigned long lastSerialTime = 0;
+const unsigned long SERIAL_INTERVAL = 500; // 每500ms打印一次
+int wifi_stations = 0;      // 連接的客戶端數量
+
+void RemoteXY_Mode_event() {
+  Serial.print("Mode changed to: ");
+  Serial.println(RemoteXY.Mode);
+}
+
+void setup() 
+{
+  Serial.begin(115200);
+  delay(1000);
+  
+  // ============== GPIO Setup ==============
+  pinMode(back_motor_pwm, OUTPUT);
+  pinMode(direction_motor_pwm, OUTPUT);
+  pinMode(back_motor_dir, OUTPUT);
+  pinMode(direction_motor_dir, OUTPUT);
+  
+  // 初始化馬達停止
+  analogWrite(back_motor_pwm, 0);
+  analogWrite(direction_motor_pwm, 0);
+  digitalWrite(back_motor_dir, LOW);
+  digitalWrite(direction_motor_dir, LOW);
+
+  // ============== WiFi Setup ==============
+  WiFi.softAP(ssid, password);
+  Serial.println("\n\nWiFi AP Started!");
+  Serial.print("SSID: ");
+  Serial.println(ssid);
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.softAPIP());
+  Serial.println("AP OK - Waiting for RemoteXY connection...");
+
+  // ============== UDP Setup ==============
+  udp.begin(udpPort);
+  Serial.println("UDP Ready");
+
+  // ============== RemoteXY Setup ==============
+  RemoteXY_Init();
+  RemoteXYEngine.addVariableEvent(RemoteXY.Mode, RemoteXY_Mode_event);
+  
+  Serial.println("RemoteXY Initialized!");
+  Serial.println("System Ready!\n");
+}
+
+int wifi_link() { 
+  // 確認wifi連接狀態，回傳訊號強度: dB值
+  wifi_stations = WiFi.softAPgetStationNum();
+  
+  if(wifi_stations == 0) {
+    return 0;
+  }
+
+  wifi_sta_list_t stationList;
+  esp_wifi_ap_get_sta_list(&stationList);
+
+  if(stationList.num > 0) {
+    return stationList.sta[0].rssi;
+  }
+
+  return 0;
+}
+
+void speed(int speedValue) {
+  // speedValue: -255 ~ 255
+  // 負值 = 後退，正值 = 前進
+  
+  current_speed = speedValue;
+  
+  if(speedValue > 0) {
+    // 前進
+    digitalWrite(back_motor_dir, HIGH);
+    analogWrite(back_motor_pwm, speedValue);
+  } 
+  else if(speedValue < 0) {
+    // 後退
+    digitalWrite(back_motor_dir, LOW);
+    analogWrite(back_motor_pwm, -speedValue);
+  } 
+  else {
+    // 停止
+    analogWrite(back_motor_pwm, 0);
+  }
+}
+
+void turn(int directionValue) {
+  // directionValue: -255 ~ 255
+  // 負值 = 左轉，正值 = 右轉
+  
+  current_direction = directionValue;
+  
+  if(directionValue > 0) {
+    // 右轉
+    digitalWrite(direction_motor_dir, HIGH);
+    analogWrite(direction_motor_pwm, directionValue);
+  } 
+  else if(directionValue < 0) {
+    // 左轉
+    digitalWrite(direction_motor_dir, LOW);
+    analogWrite(direction_motor_pwm, -directionValue);
+  } 
+  else {
+    // 直行
+    analogWrite(direction_motor_pwm, 0);
+  }
+}
+
+float readBatteryVoltage() {
+  // 讀取電池電壓 (如果有使用ADC)
+  // 這是示例代碼，需要根據實際硬體調整
+  // int rawValue = analogRead(34);
+  // float voltage = (rawValue / 4095.0) * 3.3 * 3;  // 假設分壓器比例為1:3
+  // return voltage;
+  return 12.0; // 目前使用固定值
+}
+
+void handleRemoteControl() {
+  // 從 RemoteXY 取得搖桿數值並轉換為馬達控制信號
+  
+  // Joy2_y: 前後速度控制 (-100 ~ 100)
+  int speedControl = map(RemoteXY.joy2_y, -100, 100, -255, 255);
+  speed(speedControl);
+  
+  // Joy1_x: 左右轉向控制 (-100 ~ 100)
+  int directionControl = map(RemoteXY.joy1_x, -100, 100, -255, 255);
+  turn(directionControl);
+  
+  // 更新顯示速度 (0-50 km/h 範圍)
+  RemoteXY.speed = map(abs(RemoteXY.joy2_y), 0, 100, 0, 50);
+  
+  // 更新電池電壓
+  RemoteXY.Battery = readBatteryVoltage();
+  
+  // 更新連接狀態
+  RemoteXY.connect = wifi_link();
+}
+
+void loop() 
+{ 
+  // RemoteXY 事件處理
+  RemoteXYEngine.handler();
+  
+  // 處理遙控輸入
+  handleRemoteControl();
+  
+  // 定期打印系統狀態
+  unsigned long currentTime = millis();
+  if(currentTime - lastSerialTime >= SERIAL_INTERVAL) {
+    lastSerialTime = currentTime;
+    
+    Serial.print("Connected Clients: ");
+    Serial.print(wifi_stations);
+    Serial.print(" | WiFi Signal: ");
+    Serial.print(wifi_link());
+    Serial.print(" dB | Speed: ");
+    Serial.print(current_speed);
+    Serial.print(" | Direction: ");
+    Serial.print(current_direction);
+    Serial.print(" | Mode: ");
+    Serial.print(RemoteXY.Mode);
+    Serial.print(" | Battery: ");
+    Serial.print(RemoteXY.Battery);
+    Serial.println(" V");
+  }
+}
