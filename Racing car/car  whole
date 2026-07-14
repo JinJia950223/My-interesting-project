@@ -1,20 +1,37 @@
-#define REMOTEXY_MODE__ESP32_WIFI
+/*
+   -- racing car (AP Mode Version) --
+   ESP32 作為 WiFi 熱點
+*/
+
+//////////////////////////////////////////////
+//        RemoteXY include library          //
+//////////////////////////////////////////////
+
+// you can enable debug logging to Serial at 115200
+//#define REMOTEXY__DEBUGLOG    
+
+// ==================== 1. 設定為 WiFi AP 模式 ====================
+#define REMOTEXY_MODE__WIFI_POINT
 
 #include <WiFi.h>
+#include "esp_wifi.h"
 #include <EEPROM.h>
 
-#define REMOTEXY_WIFI_SSID "Big wee wee"      
-#define REMOTEXY_WIFI_PASSWORD "12061206"     
+// ==================== 2. AP 熱點設定 ====================
+#define REMOTEXY_WIFI_SSID "RemoteXY"           // 熱點名稱
+#define REMOTEXY_WIFI_PASSWORD "12345678"       // 熱點密碼
 #define REMOTEXY_SERVER_PORT 6377
 #define REMOTEXY_ACCESS_PASSWORD "0000"
 
 #include <RemoteXY.h>
 
+// ============== Motor PIN Settings ==============
 const int back_motor_pwm = 25;
 const int direction_motor_pwm = 26;
 const int back_motor_dir = 32;      // 後馬達方向腳
 const int direction_motor_dir = 33;  // 轉向馬達方向腳
 
+// ============== Motor Speed Limits ==============
 const int MAX_MOTOR_SPEED = 255;    // 最大馬達速度
 const int MIN_MOTOR_SPEED = 0;      // 最小馬達速度
 
@@ -33,14 +50,17 @@ uint8_t const PROGMEM RemoteXY_CONF_PROGMEM[] =   // 202 bytes V21
   32,10,131,15,23,4,64,65,115,105,103,110,97,108,32,115,116,97,116,117,
   115,0 };
   
+// this structure defines all the variables and events of your control interface 
 struct {
 
+    // input variables
   int8_t joy1_x; // from -100 to 100
   int8_t joy2_y; // from -100 to 100
   int8_t joy2_x; // from -100 to 100
   int8_t joystick_01_y; // from -100 to 100
   uint8_t Mode; // from 0 to 2
 
+    // output variables
   float speed; // from 0 to 50
   float Battery;
   int16_t connect; // -32768 .. +32767
@@ -48,6 +68,11 @@ struct {
 } RemoteXY;   
 #pragma pack(pop)
  
+/////////////////////////////////////////////
+//           END RemoteXY include          //
+/////////////////////////////////////////////
+
+// ============== Variables ==============
 int current_speed = 0;           // 當前速度
 int current_direction = 0;       // 當前方向
 unsigned long lastSerialTime = 0;
@@ -89,7 +114,7 @@ void setup()
   delay(1000);
   
   Serial.println("\n\n========== Racing Car System ==========");
-  Serial.println("Version: STA Mode with RemoteXY");
+  Serial.println("Version: AP Mode with RemoteXY");
   
   // ============== GPIO Setup ==============
   pinMode(back_motor_pwm, OUTPUT);
@@ -103,43 +128,46 @@ void setup()
   digitalWrite(back_motor_dir, LOW);
   digitalWrite(direction_motor_dir, LOW);
 
-  Serial.println("\nConnecting to WiFi Hotspot...");
-  Serial.print("SSID: ");
-  Serial.println(REMOTEXY_WIFI_SSID);
+  Serial.println("\nInitializing WiFi AP Mode...");
   
-  RemoteXY_Init();  // 啟動並開始連線手機熱點
+  RemoteXY_Init();  // 啟動 AP 模式
   
   RemoteXYEngine.addVariableEvent(RemoteXY.Mode, RemoteXY_Mode_event);
 
   EEPROM.begin(RemoteXYEngine.getEepromSize()); // init EEPROM
   
-  Serial.println("RemoteXY Initialized!");
-  
-  // 等待連接
-  int timeout = 20;
-  while(WiFi.status() != WL_CONNECTED && timeout > 0) {
-    delay(500);
-    timeout--;
-  }
-  
-  if(WiFi.status() == WL_CONNECTED) {
-    Serial.print("WiFi Connected!");
-    Serial.print(" | ESP32 IP: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("WiFi Connection Failed!");
-  }
+  // AP 模式資訊
+  delay(1000);
+  Serial.println("✓ WiFi AP Started!");
+  Serial.print("✓ SSID: ");
+  Serial.println(REMOTEXY_WIFI_SSID);
+  Serial.print("✓ Password: ");
+  Serial.println(REMOTEXY_WIFI_PASSWORD);
+  Serial.print("✓ ESP32 IP: ");
+  Serial.println(WiFi.softAPIP());
   
   Serial.println("=========================================");
-  Serial.println("System Ready!\n");
+  Serial.println("System Ready! Waiting for connections...\n");
 }
 
 int wifi_link() { 
-  // 確認wifi連接狀態，回傳訊號強度: dB值
-  if (WiFi.status() != WL_CONNECTED) {
-    return 0; // 若沒連上手機，回傳 0
+  // 確認wifi連接狀態，回傳訊號強度或連接客戶端數
+  int stations = WiFi.softAPgetStationNum();
+  
+  if(stations == 0) {
+    return 0; // 若沒有客戶端連接，回傳 0
   }
-  return WiFi.RSSI(); // 直接回傳與手機熱點連接的訊號強度 (例如 -50 dBm)
+  
+  // 如果有客戶端連接，回傳客戶端數量
+  // 或者也可以回傳信號強度
+  wifi_sta_list_t stationList;
+  esp_wifi_ap_get_sta_list(&stationList);
+  
+  if(stationList.num > 0) {
+    return stationList.sta[0].rssi; // 回傳第一個客戶端的信號強度
+  }
+  
+  return 0;
 }
 
 void speed(int speedValue) {
@@ -221,16 +249,13 @@ void handleRemoteControl() {
 
 void printSystemStatus() {
   // 打印系統狀態
-  Serial.print("WiFi: ");
-  if(WiFi.status() == WL_CONNECTED) {
-    Serial.print("Connected | Signal: ");
-    Serial.print(wifi_link());
-    Serial.print(" dBm");
-  } else {
-    Serial.print("Disconnected");
-  }
+  int connected_clients = WiFi.softAPgetStationNum();
   
-  Serial.print(" | Speed: ");
+  Serial.print("Clients: ");
+  Serial.print(connected_clients);
+  Serial.print(" | Signal: ");
+  Serial.print(wifi_link());
+  Serial.print(" dBm | Speed: ");
   Serial.print(current_speed);
   Serial.print(" | Direction: ");
   Serial.print(current_direction);
