@@ -1,0 +1,62 @@
+#include <WiFi.h>
+#include "esp_wifi.h"
+#include <WiFiUdp.h>
+#include <RoboLink.h>
+
+const int back_motor_pwm = 25;
+const int direction_motor_pwm = 26;
+//const float battery_read = 34;
+const char* ssid = "ESP32_RC_CAR";
+const char* password = "12345678";
+
+WiFiUDP udp;
+const int udpPort = 8888;
+char incomingPacket[255];
+
+RoboLinkWiFi robolink;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(back_motor_pwm,OUTPUT);
+  pinMode(direction_motor_pwm,OUTPUT);
+  //pinMode(battery_read,INPUT);
+
+  WiFi.softAP(ssid, password);
+  Serial.println("WiFi AP Started!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.softAPIP());
+  WiFi.softAP(ssid,password);
+  Serial.println("AP OK");
+
+  udp.begin(udpPort);
+  Serial.println("UDP Ready");
+}
+
+int wifi_link() { //確認wifi連接狀態，回傳訊號強度:dB值
+  if(WiFi.softAPgetStationNum() == 0) {
+    return 0;
+  }
+
+  wifi_sta_list_t stationList;
+  esp_wifi_ap_get_sta_list(&stationList);
+
+  if(stationList.num > 0) {
+    return stationList.sta[0].rssi;
+  }
+
+  return 0;
+}
+
+void speed(int back_motor_pwm) {
+
+}
+
+void turn(int direction_motor_pwm) {
+
+}
+
+void loop() {
+  Serial.println(wifi_link());
+
+  
+}
